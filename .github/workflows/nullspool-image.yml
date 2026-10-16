@@ -1,6 +1,7 @@
 # Builds the Postiz image with the Nullspool channel for gmktec (amd64 only).
-# A tag like v2.25.0-nullspool.1 pushes ghcr.io/<owner>/postiz-app:v2.25.0-nullspool.1;
-# a push to the nullspool branch or a manual run only builds, so a broken build shows here first.
+# A tag like v2.25.0-nullspool.1, or a manual run with that as `release`, pushes
+# ghcr.io/<owner>/postiz-app:v2.25.0-nullspool.1. A push to the nullspool branch only builds, so a
+# broken build shows here first.
 name: nullspool-image
 
 on:
@@ -8,22 +9,34 @@ on:
     branches: [nullspool]
     tags: ['v*-nullspool.*']
   workflow_dispatch:
+    inputs:
+      release:
+        description: Image tag to publish, e.g. v2.25.0-nullspool.1 (empty = build only)
+        required: false
 
 permissions:
   contents: read
   packages: write
+
+env:
+  # The tag push name, or the manual `release` input; empty means build only.
+  RELEASE: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release }}
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      - name: Check the release name
+        if: env.RELEASE != ''
+        run: '[[ "$RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nullspool\.[0-9]+$ ]] || { echo "bad release name"; exit 1; }'
+
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to ghcr
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.RELEASE != ''
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -35,8 +48,8 @@ jobs:
           context: .
           file: Dockerfile.dev
           platforms: linux/amd64
-          build-args: NEXT_PUBLIC_VERSION=${{ github.ref_name }}
-          push: ${{ startsWith(github.ref, 'refs/tags/') }}
-          tags: ghcr.io/${{ github.repository_owner }}/postiz-app:${{ github.ref_name }}
+          build-args: NEXT_PUBLIC_VERSION=${{ env.RELEASE || github.ref_name }}
+          push: ${{ env.RELEASE != '' }}
+          tags: ghcr.io/${{ github.repository_owner }}/postiz-app:${{ env.RELEASE || github.ref_name }}
           provenance: false
           sbom: false

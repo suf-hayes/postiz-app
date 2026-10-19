@@ -9,6 +9,9 @@ on:
 
 jobs:
   build-containers-common:
+    # Nullspool fork: these push to gitroomhq's registry, which a fork cannot write;
+    # the fork's image comes from nullspool-image.yml. Downstream jobs skip with this one.
+    if: github.repository == 'gitroomhq/postiz-app'
     runs-on: ubuntu-latest
     outputs:
       containerver: ${{ steps.getcontainerver.outputs.containerver }}

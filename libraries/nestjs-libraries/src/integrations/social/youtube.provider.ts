@@ -586,6 +586,9 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
           status: {
             privacyStatus: settings.type,
             selfDeclaredMadeForKids: settings.selfDeclaredMadeForKids === 'yes',
+            containsSyntheticMedia: this.aiLabel(
+              settings.containsSyntheticMedia
+            ),
           },
         }),
       }
@@ -613,6 +616,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
           path,
           uploadedBytes: 0,
           thumbnail: settings?.thumbnail?.path || '',
+          playlistId: settings?.playlistId || '',
         },
       },
     ];
@@ -626,6 +630,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       path: string;
       uploadedBytes: number;
       thumbnail: string;
+      playlistId?: string;
       videoId?: string;
     },
     integration: Integration
@@ -646,9 +651,10 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       return { status: 'pending', pendingData };
     }
 
-    // the upload completed: the video exists, only the thumbnail may be left
+    // the upload completed: the video exists, only the thumbnail and the
+    // playlist may be left
     if ('videoId' in probe) {
-      if (pendingData.thumbnail) {
+      if (pendingData.thumbnail || pendingData.playlistId) {
         return {
           status: 'ready',
           pendingData: { ...pendingData, videoId: probe.videoId },
@@ -677,6 +683,7 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       path: string;
       uploadedBytes: number;
       thumbnail: string;
+      playlistId?: string;
       videoId?: string;
     },
     integration: Integration
@@ -811,11 +818,62 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       );
     }
 
+    if (pendingData.playlistId) {
+      await this.addToPlaylist(accessToken, pendingData.playlistId, videoId!);
+    }
+
     return {
       status: 'completed',
       postId: videoId,
       releaseURL: `https://www.youtube.com/watch?v=${videoId}`,
     };
+  }
+
+  // The video is live by now: a bad playlist must never fail (and risk
+  // re-uploading) it, so errors are only logged. finalizePost can run again
+  // after the upload completed, so check membership first - playlistItems
+  // .insert is not idempotent (list costs 1 quota unit, insert 50).
+  private async addToPlaylist(
+    accessToken: string,
+    playlistId: string,
+    videoId: string
+  ) {
+    try {
+      const { client, youtube } = clientAndYoutube();
+      client.setCredentials({ access_token: accessToken });
+      const youtubeClient = youtube(client);
+
+      const existing = await this.runInConcurrent(async () =>
+        youtubeClient.playlistItems.list({
+          part: ['id'],
+          playlistId,
+          videoId,
+          maxResults: 1,
+        })
+      );
+
+      if (existing?.data?.items?.length) {
+        return;
+      }
+
+      await this.runInConcurrent(async () =>
+        youtubeClient.playlistItems.insert({
+          part: ['snippet'],
+          requestBody: {
+            snippet: {
+              playlistId,
+              resourceId: { kind: 'youtube#video', videoId },
+            },
+          },
+        })
+      );
+    } catch (err) {
+      console.error('Failed to add the YouTube video to its playlist:', {
+        playlistId,
+        videoId,
+        error: (err as any)?.message,
+      });
+    }
   }
 
   // Old blocking behavior, kept for workflow versions before v1.0.6 that still

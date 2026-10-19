@@ -83,6 +83,16 @@ export class YoutubeSettingsDto {
   @Type(() => MediaDto)
   thumbnail?: MediaDto;
 
+  // Sent as status.containsSyntheticMedia (altered or synthetic content
+  // disclosure); on unless set to false.
+  @IsOptional()
+  containsSyntheticMedia?: boolean;
+
+  // Playlist the video is added to once it is uploaded.
+  @IsOptional()
+  @IsString()
+  playlistId?: string;
+
   @IsArray()
   @IsOptional()
   @ValidateNested({ each: true })

@@ -714,6 +714,10 @@ export class InstagramProvider
           )}`
         : ``;
     const isTrialReel = this.assetBoolean(firstPost.settings.is_trial_reel);
+    // AI self-disclosure: not available on carousel children (it goes on the
+    // carousel container in finalizePost) and left off stories.
+    const aiGenerated =
+      !isStory && this.aiLabel(firstPost.settings.is_ai_generated);
     const medias = await Promise.all(
       firstPost?.media?.map(async (m) => {
         const caption =
@@ -757,6 +761,10 @@ export class InstagramProvider
         // they go on the carousel container instead
         const itemCollaborators =
           firstPost?.media?.length === 1 ? collaborators : ``;
+        const itemAiGenerated =
+          aiGenerated && firstPost?.media?.length === 1
+            ? `&is_ai_generated=true`
+            : ``;
 
         // audio_configuration is only supported for Reels (single video, not a story)
         // and only with Facebook Login (not Instagram Login / graph.instagram.com)
@@ -783,7 +791,7 @@ export class InstagramProvider
 
         const { id: photoId } = await (
           await this.fetch(
-            `https://${type}/${META_GRAPH_API_VERSION}/${id}/media?${mediaType}${isCarousel}${itemCollaborators}${trialParams}${audioConfiguration}&access_token=${accessToken}${caption}`,
+            `https://${type}/${META_GRAPH_API_VERSION}/${id}/media?${mediaType}${isCarousel}${itemCollaborators}${itemAiGenerated}${trialParams}${audioConfiguration}&access_token=${accessToken}${caption}`,
             {
               method: 'POST',
             }
@@ -813,6 +821,7 @@ export class InstagramProvider
               : 'carousel',
           containers: medias,
           message: firstPost?.message || '',
+          ...(aiGenerated ? { aiGenerated: true } : {}),
           ...(collaborators
             ? {
                 collaborators: firstPost.settings.collaborators!.map((p) =>
@@ -834,6 +843,7 @@ export class InstagramProvider
       message?: string;
       carouselId?: string;
       collaborators?: string[];
+      aiGenerated?: boolean;
     },
     integration: Integration
   ): Promise<PendingCheckResponse> {
@@ -901,6 +911,7 @@ export class InstagramProvider
       message?: string;
       carouselId?: string;
       collaborators?: string[];
+      aiGenerated?: boolean;
     },
     integration: Integration
   ): Promise<PendingCheckResponse> {
@@ -963,6 +974,8 @@ export class InstagramProvider
                   JSON.stringify(pendingData.collaborators)
                 )}`
               : ``
+          }${
+            pendingData.aiGenerated ? `&is_ai_generated=true` : ``
           }&access_token=${accessToken}`,
           {
             method: 'POST',

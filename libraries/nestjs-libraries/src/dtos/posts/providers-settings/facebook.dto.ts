@@ -116,4 +116,11 @@ export class FacebookDto {
     description: 'Title of the video, used only for video (non-story) posts',
   })
   title?: string;
+
+  @IsOptional()
+  @JSONSchema({
+    description:
+      'AI self-disclosure (is_ai_generated) on video posts, published as Reels. On unless set to false',
+  })
+  is_ai_generated?: boolean;
 }

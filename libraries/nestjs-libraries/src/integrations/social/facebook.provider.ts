@@ -25,8 +25,27 @@ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorato
 
 export const META_GRAPH_API_VERSION = 'v25.0';
 
+type FacebookStoryPending = {
+  postType: 'story';
+  items: { kind: 'video' | 'photo'; mediaId: string }[];
+  publishedCount: number;
+  lastPostId: string;
+  attempting?: number | null;
+  confirmed?: boolean;
+};
+
+type FacebookReelPending = {
+  postType: 'reel';
+  videoId: string;
+  description: string;
+  title: string;
+  aiGenerated: boolean;
+};
+
+type FacebookPending = FacebookStoryPending | FacebookReelPending;
+
 @Rules(
-  "Facebook posts can be text only, or include photos or a video. If it's a story, it must have at least one attachment (photo or video), and each media is published as a separate story. Video posts (not stories) can carry an optional title."
+  "Facebook posts can be text only, or include photos or a video. If it's a story, it must have at least one attachment (photo or video), and each media is published as a separate story. Video posts (not stories) are published as Reels (vertical, 3 to 90 seconds) and can carry an optional title."
 )
 export class FacebookProvider extends SocialAbstract implements SocialProvider {
   identifier = 'facebook';
@@ -560,6 +579,62 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     return videoStatus === 'upload_complete' || videoStatus === 'ready';
   }
 
+  // Single, read-only status check of a Reel. 'published' as soon as the
+  // finish call went through (publishing started or done), so a crashed run
+  // never sends it twice.
+  private async fbReelStatus(
+    videoId: string,
+    accessToken: string
+  ): Promise<'uploading' | 'ready' | 'published'> {
+    const { status } = await (
+      await this.fetch(
+        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${videoId}?fields=status&access_token=${accessToken}`,
+        undefined,
+        '',
+        0,
+        true
+      )
+    ).json();
+
+    const videoStatus = status?.video_status || '';
+    const done = (phase?: { status?: string }) =>
+      phase?.status === 'complete' || phase?.status === 'completed';
+
+    if (
+      ['error', 'upload_failed', 'expired'].includes(videoStatus) ||
+      [
+        status?.uploading_phase,
+        status?.processing_phase,
+        status?.publishing_phase,
+      ].some((phase) => phase?.status === 'error')
+    ) {
+      throw new BadBody(
+        this.identifier,
+        JSON.stringify({ status }),
+        '{}',
+        'Reel processing failed'
+      );
+    }
+
+    const publishing = status?.publishing_phase;
+    if (
+      publishing?.status === 'in_progress' ||
+      done(publishing) ||
+      publishing?.publish_status === 'published'
+    ) {
+      return 'published';
+    }
+
+    if (
+      done(status?.uploading_phase) ||
+      ['upload_complete', 'ready', 'processing'].includes(videoStatus)
+    ) {
+      return 'ready';
+    }
+
+    return 'uploading';
+  }
+
   async postPending(
     id: string,
     accessToken: string,
@@ -637,21 +712,73 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       ];
     }
 
+    // Videos go out as Reels: only /video_reels takes the is_ai_generated
+    // self-disclosure, /{page}/videos has no AI field. The upload is invisible
+    // until finalizePost sends the finish call.
+    if (hasExtension(firstPost?.media?.[0]?.path, 'mp4')) {
+      const { video_id, upload_url } = await (
+        await this.fetch(
+          `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/video_reels?upload_phase=start&access_token=${accessToken}`,
+          {
+            method: 'POST',
+          },
+          'start reel upload'
+        )
+      ).json();
+
+      await this.fetch(
+        upload_url ||
+          `https://rupload.facebook.com/video-upload/${META_GRAPH_API_VERSION}/${video_id}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `OAuth ${accessToken}`,
+            file_url: firstPost.media![0].path,
+          },
+        },
+        'upload reel'
+      );
+
+      return [
+        {
+          id: firstPost.id,
+          postId: '',
+          releaseURL: '',
+          status: 'pending',
+          pendingData: {
+            postType: 'reel',
+            videoId: video_id,
+            description: firstPost.message || '',
+            title: firstPost?.settings?.title || '',
+            aiGenerated: this.aiLabel(firstPost?.settings?.is_ai_generated),
+          } satisfies FacebookReelPending,
+        },
+      ];
+    }
+
     return this.postNonStory(id, accessToken, postDetails);
   }
 
   override async checkPostStatus(
     accessToken: string,
-    pendingData: {
-      postType: 'story';
-      items: { kind: 'video' | 'photo'; mediaId: string }[];
-      publishedCount: number;
-      lastPostId: string;
-      attempting?: number | null;
-      confirmed?: boolean;
-    },
+    pendingData: FacebookPending,
     integration: Integration
   ): Promise<PendingCheckResponse> {
+    if (pendingData.postType === 'reel') {
+      const reel = await this.fbReelStatus(pendingData.videoId, accessToken);
+      if (reel === 'published') {
+        return {
+          status: 'completed',
+          postId: pendingData.videoId,
+          releaseURL: `https://www.facebook.com/reel/${pendingData.videoId}`,
+        };
+      }
+
+      return reel === 'ready'
+        ? { status: 'ready', pendingData }
+        : { status: 'pending', pendingData };
+    }
+
     // A confirmed publish attempt died without reporting its result: Facebook
     // has no API to ask whether a story was published, so never publish that
     // item again - stop with an explicit warning instead.
@@ -690,16 +817,36 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
   override async finalizePost(
     accessToken: string,
-    pendingData: {
-      postType: 'story';
-      items: { kind: 'video' | 'photo'; mediaId: string }[];
-      publishedCount: number;
-      lastPostId: string;
-      attempting?: number | null;
-      confirmed?: boolean;
-    },
+    pendingData: FacebookPending,
     integration: Integration
   ): Promise<PendingCheckResponse> {
+    if (pendingData.postType === 'reel') {
+      // same query-string shape as the video_stories finish call above
+      const params = new URLSearchParams({
+        upload_phase: 'finish',
+        video_id: pendingData.videoId,
+        video_state: 'PUBLISHED',
+        description: pendingData.description,
+        ...(pendingData.title ? { title: pendingData.title } : {}),
+        is_ai_generated: String(pendingData.aiGenerated),
+        access_token: accessToken,
+      });
+
+      await this.fetch(
+        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${integration.internalId}/video_reels?${params}`,
+        {
+          method: 'POST',
+        },
+        'publish reel'
+      );
+
+      return {
+        status: 'completed',
+        postId: pendingData.videoId,
+        releaseURL: `https://www.facebook.com/reel/${pendingData.videoId}`,
+      };
+    }
+
     // Publish exactly one story per call, with an arm -> confirm -> publish
     // handshake: the publish only runs after checkPostStatus witnessed the
     // intent, so a run that dies mid-publish is detectable and the item is
@@ -829,150 +976,113 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   ): Promise<PostResponse[]> {
     const [firstPost] = postDetails;
 
-    let finalId = '';
-    let finalUrl = '';
-    if (hasExtension(firstPost?.media?.[0]?.path, 'mp4')) {
-      const {
-        id: videoId,
-        permalink_url,
-        ...all
-      } = await (
+    const uploadPhotos = !firstPost?.media?.length
+      ? []
+      : await Promise.all(
+          firstPost.media.map(async (media) => {
+            const { id: photoId } = await (
+              await this.fetch(
+                `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/photos?access_token=${accessToken}`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    url: media.path,
+                    published: false,
+                  }),
+                },
+                'upload images slides'
+              )
+            ).json();
+
+            return { media_fbid: photoId };
+          })
+        );
+
+    // Background presets are only valid on text-only posts (no media) and
+    // Facebook caps them at ~130 chars, so we only attach the preset when it
+    // can apply.
+    const presetId =
+      !uploadPhotos?.length &&
+      firstPost?.settings?.text_format_preset_id &&
+      (firstPost.message?.length || 0) <= FACEBOOK_PRESET_MAX_CHARS
+        ? firstPost.settings.text_format_preset_id
+        : undefined;
+
+    const publishFeed = async (withPreset: boolean) =>
+      (
         await this.fetch(
-          `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/videos?access_token=${accessToken}&fields=id,permalink_url`,
+          `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/feed?access_token=${accessToken}&fields=id,permalink_url`,
           {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              file_url: firstPost?.media?.[0]?.path!,
-              description: firstPost.message,
-              ...(firstPost?.settings?.title
-                ? { title: firstPost.settings.title }
+              ...(uploadPhotos?.length ? { attached_media: uploadPhotos } : {}),
+              ...(firstPost?.settings?.url
+                ? { link: firstPost.settings.url }
                 : {}),
+              ...(withPreset && presetId
+                ? { text_format_preset_id: presetId }
+                : {}),
+              message: firstPost.message,
               published: true,
             }),
           },
-          'upload mp4'
+          'finalize upload'
         )
       ).json();
 
-      finalUrl = 'https://www.facebook.com/reel/' + videoId;
-      finalId = videoId;
-    } else {
-      const uploadPhotos = !firstPost?.media?.length
-        ? []
-        : await Promise.all(
-            firstPost.media.map(async (media) => {
-              const { id: photoId } = await (
-                await this.fetch(
-                  `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/photos?access_token=${accessToken}`,
-                  {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                      url: media.path,
-                      published: false,
-                    }),
-                  },
-                  'upload images slides'
-                )
-              ).json();
-
-              return { media_fbid: photoId };
-            })
-          );
-
-      // Background presets are only valid on text-only posts (no media) and
-      // Facebook caps them at ~130 chars, so we only attach the preset when it
-      // can apply.
-      const presetId =
-        !uploadPhotos?.length &&
-        firstPost?.settings?.text_format_preset_id &&
-        (firstPost.message?.length || 0) <= FACEBOOK_PRESET_MAX_CHARS
-          ? firstPost.settings.text_format_preset_id
-          : undefined;
-
-      const publishFeed = async (withPreset: boolean) =>
-        (
-          await this.fetch(
-            `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/feed?access_token=${accessToken}&fields=id,permalink_url`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                ...(uploadPhotos?.length
-                  ? { attached_media: uploadPhotos }
-                  : {}),
-                ...(firstPost?.settings?.url
-                  ? { link: firstPost.settings.url }
-                  : {}),
-                ...(withPreset && presetId
-                  ? { text_format_preset_id: presetId }
-                  : {}),
-                message: firstPost.message,
-                published: true,
-              }),
-            },
-            'finalize upload'
-          )
-        ).json();
-
-      // Facebook exposes no official preset list and adds/retires backgrounds
-      // over time, so a stale text_format_preset_id can make FB reject the whole
-      // post. Observed Graph API responses for a bad preset:
-      //   - malformed id  -> HTTP 400, code 100, message names
-      //                      "text_format_preset_id" explicitly
-      //   - retired numeric id -> HTTP 500, code 1, generic "unknown error"
-      //     (our fetch() retries 500s and then reports it with the body stripped)
-      // So retry once without the preset on an explicit preset error or a
-      // generic/unknown failure, but never on a recognized auth/token error
-      // (dropping the background can't fix that). A retry that only succeeds once
-      // the preset is removed confirms the preset was the cause.
-      const isPresetRejection = (err: any): boolean => {
-        const detail = `${err?.details?.[0]?.json ?? ''} ${err?.message ?? ''}`;
-        if (
-          /access token|re-authenticate|revoked|"code":\s*190\b/i.test(detail)
-        ) {
-          return false;
-        }
-        return (
-          /text_format_preset_id/i.test(detail) ||
-          /"code":\s*1\b/.test(detail) ||
-          String(err?.message) === 'Unknown Error'
-        );
-      };
-
-      let feedResult: any;
-      try {
-        feedResult = await publishFeed(!!presetId);
-      } catch (err) {
-        if (!presetId || !isPresetRejection(err)) {
-          throw err;
-        }
-        // Surface the (recovered) rejection in the logs, since the fallback
-        // below makes the activity succeed and Facebook's error would otherwise
-        // be swallowed silently.
-        console.warn(
-          'Facebook rejected text_format_preset_id — dropping the background and publishing as plain text',
-          {
-            preset: presetId,
-            facebook: (err as any)?.details?.[0]?.json,
-            message: (err as any)?.message,
-          }
-        );
-        feedResult = await publishFeed(false);
+    // Facebook exposes no official preset list and adds/retires backgrounds
+    // over time, so a stale text_format_preset_id can make FB reject the whole
+    // post. Observed Graph API responses for a bad preset:
+    //   - malformed id  -> HTTP 400, code 100, message names
+    //                      "text_format_preset_id" explicitly
+    //   - retired numeric id -> HTTP 500, code 1, generic "unknown error"
+    //     (our fetch() retries 500s and then reports it with the body stripped)
+    // So retry once without the preset on an explicit preset error or a
+    // generic/unknown failure, but never on a recognized auth/token error
+    // (dropping the background can't fix that). A retry that only succeeds once
+    // the preset is removed confirms the preset was the cause.
+    const isPresetRejection = (err: any): boolean => {
+      const detail = `${err?.details?.[0]?.json ?? ''} ${err?.message ?? ''}`;
+      if (
+        /access token|re-authenticate|revoked|"code":\s*190\b/i.test(detail)
+      ) {
+        return false;
       }
+      return (
+        /text_format_preset_id/i.test(detail) ||
+        /"code":\s*1\b/.test(detail) ||
+        String(err?.message) === 'Unknown Error'
+      );
+    };
 
-      const { id: postId, permalink_url, ...all } = feedResult;
-
-      finalUrl = permalink_url;
-      finalId = postId;
+    let feedResult: any;
+    try {
+      feedResult = await publishFeed(!!presetId);
+    } catch (err) {
+      if (!presetId || !isPresetRejection(err)) {
+        throw err;
+      }
+      // Surface the (recovered) rejection in the logs, since the fallback
+      // below makes the activity succeed and Facebook's error would otherwise
+      // be swallowed silently.
+      console.warn(
+        'Facebook rejected text_format_preset_id — dropping the background and publishing as plain text',
+        {
+          preset: presetId,
+          facebook: (err as any)?.details?.[0]?.json,
+          message: (err as any)?.message,
+        }
+      );
+      feedResult = await publishFeed(false);
     }
+
+    const { id: finalId, permalink_url: finalUrl } = feedResult;
 
     return [
       {

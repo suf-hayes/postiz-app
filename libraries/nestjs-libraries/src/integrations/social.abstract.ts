@@ -229,6 +229,15 @@ export abstract class SocialAbstract {
     return value || false;
   }
 
+  // Nullspool fork: everything this instance posts is AI-made, so the
+  // platform AI label is on unless a post explicitly turns it off.
+  protected aiLabel(value?: boolean | string | null) {
+    if (value === undefined || value === null || value === '') {
+      return true;
+    }
+    return this.assetBoolean(value);
+  }
+
   /** Reads the pixel dimensions of an image via sharp (works for http or local paths). */
   protected async getImageDimensions(
     path: string

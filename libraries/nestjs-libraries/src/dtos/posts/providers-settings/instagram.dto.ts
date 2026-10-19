@@ -56,6 +56,10 @@ export class InstagramDto {
   @IsOptional()
   is_trial_reel?: boolean;
 
+  // Sent as is_ai_generated on feed posts and Reels; on unless set to false.
+  @IsOptional()
+  is_ai_generated?: boolean;
+
   @IsIn(['MANUAL', 'SS_PERFORMANCE'])
   @IsOptional()
   graduation_strategy?: 'MANUAL' | 'SS_PERFORMANCE';

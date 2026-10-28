@@ -95,7 +95,7 @@ const YoutubeSettings: FC = () => {
 };
 export default withProvider({
   postComment: PostComment.COMMENT,
-  comments: false,
+  comments: 'no-media',
   minimumCharacters: [],
   SettingsComponent: YoutubeSettings,
   CustomPreviewComponent: YoutubePreview,

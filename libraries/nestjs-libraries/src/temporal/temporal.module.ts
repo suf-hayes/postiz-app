@@ -38,6 +38,11 @@ export const getTemporalModule = (
     logLevel: 'error',
     ...(isWorkers
       ? {
+          // The library's default is to log a failed connection and start with
+          // no workers, which leaves every post stuck in QUEUE while the process
+          // looks healthy (e.g. when Temporal is still booting after a host
+          // restart). Fail startup instead so the process manager restarts us.
+          allowConnectionFailure: false,
           workers: [
             ...[
               { identifier: 'main', maxConcurrentJob: undefined },

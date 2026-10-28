@@ -251,6 +251,14 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       };
     }
 
+    if (body.includes('commentsDisabled')) {
+      return {
+        type: 'bad-body',
+        value:
+          'Your video was posted, but YouTube refused the comment: comments are turned off for this video (videos made for kids always have them off).',
+      };
+    }
+
     if (body.includes('Unauthorized')) {
       return {
         type: 'refresh-token',
@@ -932,6 +940,55 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
         error: (err as any)?.message,
       });
     }
+  }
+
+  // Follow-up posts become top-level comments on the video (commentThreads
+  // .insert, 50 quota units, scope youtube.force-ssl). YouTube only
+  // nests one level deep (replies to a top-level comment), so a chain of
+  // follow-ups is posted as separate comments rather than replies to each
+  // other, and lastCommentId is not used. YouTube has no API to pin a comment.
+  async comment(
+    id: string,
+    postId: string,
+    lastCommentId: string | undefined,
+    accessToken: string,
+    postDetails: PostDetails[],
+    integration: Integration
+  ): Promise<PostResponse[]> {
+    const [commentPost] = postDetails;
+
+    const { id: commentId } = await (
+      await this.fetch(
+        'https://www.googleapis.com/youtube/v3/commentThreads?part=snippet',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            snippet: {
+              // the integration's internalId is the channel id (see reConnect)
+              channelId: id,
+              videoId: postId,
+              topLevelComment: {
+                snippet: { textOriginal: commentPost.message },
+              },
+            },
+          }),
+        },
+        this.identifier
+      )
+    ).json();
+
+    return [
+      {
+        id: commentPost.id,
+        postId: commentId,
+        releaseURL: `https://www.youtube.com/watch?v=${postId}&lc=${commentId}`,
+        status: 'success',
+      },
+    ];
   }
 
   // Old blocking behavior, kept for workflow versions before v1.0.6 that still

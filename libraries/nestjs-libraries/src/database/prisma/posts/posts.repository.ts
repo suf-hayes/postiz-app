@@ -152,7 +152,11 @@ export class PostsRepository {
     }
   }
 
-  async getPosts(orgId: string, query: GetPostsDto) {
+  async getPosts(
+    orgId: string,
+    query: GetPostsDto,
+    options: { includeMedia?: boolean } = {}
+  ) {
     // Use the provided start and end dates directly
     const startDate = dayjs.utc(query.startDate).toDate();
     const endDate = dayjs.utc(query.endDate).toDate();
@@ -203,6 +207,7 @@ export class PostsRepository {
         group: true,
         creationMethod: true,
         settings: true,
+        image: !!options.includeMedia,
         tags: {
           where: {
             tag: {

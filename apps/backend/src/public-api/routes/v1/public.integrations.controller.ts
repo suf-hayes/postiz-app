@@ -136,7 +136,9 @@ export class PublicIntegrationsController {
     @Query() query: GetPostsDto
   ) {
     Sentry.metrics.count('public_api-request', 1);
-    const posts = await this._postsService.getPosts(org.id, query);
+    const posts = await this._postsService.getPosts(org.id, query, {
+      includeMedia: true,
+    });
     return {
       posts,
       // comments,
@@ -253,6 +255,14 @@ export class PublicIntegrationsController {
   async getActiveIntegrations(@GetOrgFromRequest() org: Organization) {
     Sentry.metrics.count('public_api-request', 1);
     return { connected: true };
+  }
+
+  // Lets public API clients, such as the companion app, tell this fork from
+  // upstream Postiz and offer only the features this server supports.
+  @Get('/fork-info')
+  async getForkInfo() {
+    Sentry.metrics.count('public_api-request', 1);
+    return { fork: 'nullspool', features: ['post-media'] };
   }
 
   @Get('/media')

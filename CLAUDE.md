@@ -78,3 +78,7 @@ const useCommunity = () => {
 - Never silently change the meaning or format of a value persisted in an existing DB column; that affects every reader and all historical rows, so ask first. 
 - Never return a raw Prisma row from a model that holds credentials (`Integration`, `User` and similar) in a controller response. Repository writes on those models must use a `select` with only the fields the caller needs (like `setTimes` with `select: { id: true }`), or the controller returns nothing. This applies even where nearby code looks different.
 - Be extra careful with code invoked by webhooks of external systems (Stripe, RevenueCat and other payment providers), including everything they call down the stack (e.g. `SubscriptionService.createOrUpdateSubscription`, `modifySubscription`, `deleteSubscription`). That code must not throw exceptions: never add a `throw`, and wrap any call that can fail (DB, provider API) so a failure is caught and logged instead of propagating. A webhook that throws leaves billing state half-applied for a paying customer.
+
+## Fork notes (suf-hayes/postiz-app, branch `nullspool`)
+- `GET /public/v1/fork-info` lists fork-only features for API clients. Add a feature name there whenever the fork adds a public-API capability the companion app may use.
+- `nullspool` is the default branch, so scheduled workflows run from it. Upstream's scheduled ones (`staging-conflicts.yml`, `stale.yml`) are deleted here because they need upstream's secrets; drop them again if a rebase brings them back.

@@ -290,6 +290,8 @@ export abstract class SocialAbstract {
     try {
       const size = await this.mediaSize(path);
       let offset = 0;
+      // real files have a handful of top-level boxes; the cap stops a
+      // corrupt file from turning into hundreds of reads
       for (let boxes = 0; boxes < 32 && offset + 8 <= size; boxes++) {
         const header = await this.mediaChunk(
           path,
@@ -326,7 +328,10 @@ export abstract class SocialAbstract {
                 version === 1
                   ? Number(moov.readBigUInt64BE(child + 32))
                   : moov.readUInt32BE(child + 24);
-              return timescale ? duration / timescale : undefined;
+              // fragmented mp4s leave 0 here (the length is in mvex/mehd)
+              return timescale && duration && duration !== 0xffffffff
+                ? duration / timescale
+                : undefined;
             }
             if (childSize < 8) {
               return undefined;

@@ -11,6 +11,7 @@ import dayjs from 'dayjs';
 import {
   BadBody,
   SocialAbstract,
+  stripQuery,
   ValidityMedia,
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import {
@@ -586,7 +587,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
     const videoStatus = status?.video_status || 'in_progress';
 
-    if (videoStatus === 'error') {
+    if (['error', 'upload_failed', 'expired'].includes(videoStatus)) {
       throw new BadBody(
         this.identifier,
         JSON.stringify({ status }),
@@ -734,19 +735,16 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       ];
     }
 
-    if (
-      hasExtension(firstPost?.media?.[0]?.path, 'mp4') &&
-      !(await this.publishAsReel(firstPost))
-    ) {
-      return this.postPageVideo(id, accessToken, firstPost);
-    }
-
     // Short videos go out as Reels: only /video_reels takes the
-    // is_ai_generated self-disclosure, /{page}/videos has no AI field (an
-    // is_ai_generated sent there is accepted and dropped - checked on v25.0
-    // and v27.0). The upload is invisible until finalizePost sends the finish
-    // call.
+    // is_ai_generated self-disclosure, /{page}/videos documents no AI field
+    // (it takes an is_ai_generated without error, but the field can't be
+    // read back on any video, so nothing shows it applies). The upload is
+    // invisible until finalizePost sends the finish call.
     if (hasExtension(firstPost?.media?.[0]?.path, 'mp4')) {
+      if (!(await this.publishAsReel(firstPost))) {
+        return this.postPageVideo(id, accessToken, firstPost);
+      }
+
       const { video_id, upload_url } = await (
         await this.fetch(
           `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/video_reels?upload_phase=start&access_token=${accessToken}`,
@@ -800,7 +798,15 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     }
 
     const duration = await this.videoDuration(post.media![0].path);
-    return duration !== undefined && duration <= FACEBOOK_REEL_MAX_SECONDS;
+    if (duration === undefined) {
+      console.warn(
+        'Facebook: could not read the video length, publishing as a Page video (no AI label)',
+        { path: stripQuery(post.media![0].path) }
+      );
+      return false;
+    }
+
+    return duration <= FACEBOOK_REEL_MAX_SECONDS;
   }
 
   // Normal Page video: Facebook pulls file_url itself and publishes once

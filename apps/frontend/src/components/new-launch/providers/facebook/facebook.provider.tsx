@@ -96,7 +96,9 @@ export const FacebookSettings = () => {
           <Select
             label="Video Format (only for video Post)"
             hideErrors
-            {...register('video_format')}
+            {...register('video_format', {
+              value: 'auto',
+            })}
           >
             {videoFormat.map((item) => (
               <option key={item.value} value={item.value}>

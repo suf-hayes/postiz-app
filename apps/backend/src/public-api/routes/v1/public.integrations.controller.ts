@@ -262,7 +262,10 @@ export class PublicIntegrationsController {
   @Get('/fork-info')
   async getForkInfo() {
     Sentry.metrics.count('public_api-request', 1);
-    return { fork: 'nullspool', features: ['post-media'] };
+    return {
+      fork: 'nullspool',
+      features: ['post-media', 'facebook-page-video'],
+    };
   }
 
   @Get('/media')

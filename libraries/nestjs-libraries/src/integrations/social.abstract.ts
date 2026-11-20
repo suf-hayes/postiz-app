@@ -281,6 +281,70 @@ export abstract class SocialAbstract {
     return { width, height };
   }
 
+  // Length of an mp4/mov in seconds, read from the moov/mvhd box with a few
+  // small ranged reads (one header per top-level box, then moov itself), so a
+  // trailing moov costs no more than a leading one. Returns undefined when the
+  // length can't be read - a server that ignores Range, a box layout we don't
+  // expect - and never throws: callers pick their own fallback.
+  protected async videoDuration(path: string): Promise<number | undefined> {
+    try {
+      const size = await this.mediaSize(path);
+      let offset = 0;
+      for (let boxes = 0; boxes < 32 && offset + 8 <= size; boxes++) {
+        const header = await this.mediaChunk(
+          path,
+          offset,
+          Math.min(offset + 15, size - 1)
+        );
+        let boxSize = header.readUInt32BE(0);
+        const type = header.toString('latin1', 4, 8);
+        if (boxSize === 1 && header.length >= 16) {
+          boxSize = Number(header.readBigUInt64BE(8));
+        } else if (boxSize === 0) {
+          boxSize = size - offset;
+        }
+        if (boxSize < 8) {
+          return undefined;
+        }
+
+        if (type === 'moov') {
+          // moov holds only metadata; cap the read in case a file lies
+          const moov = await this.mediaChunk(
+            path,
+            offset,
+            Math.min(offset + boxSize, offset + 8 * 1024 * 1024, size) - 1
+          );
+          let child = 8;
+          while (child + 8 <= moov.length) {
+            const childSize = moov.readUInt32BE(child);
+            if (moov.toString('latin1', child + 4, child + 8) === 'mvhd') {
+              const version = moov.readUInt8(child + 8);
+              const timescale = moov.readUInt32BE(
+                child + (version === 1 ? 28 : 20)
+              );
+              const duration =
+                version === 1
+                  ? Number(moov.readBigUInt64BE(child + 32))
+                  : moov.readUInt32BE(child + 24);
+              return timescale ? duration / timescale : undefined;
+            }
+            if (childSize < 8) {
+              return undefined;
+            }
+            child += childSize;
+          }
+          return undefined;
+        }
+
+        offset += boxSize;
+      }
+    } catch (err) {
+      return undefined;
+    }
+
+    return undefined;
+  }
+
   // Reads the whole media into memory: used for images, which the providers
   // hand straight to sharp. Lives here rather than in a helper so it can
   // classify a stall like the ranged reads below do.

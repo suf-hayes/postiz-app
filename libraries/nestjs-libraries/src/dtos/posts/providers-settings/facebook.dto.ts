@@ -117,10 +117,18 @@ export class FacebookDto {
   })
   title?: string;
 
+  @IsIn(['auto', 'reel', 'video'])
   @IsOptional()
   @JSONSchema({
     description:
-      'AI self-disclosure (is_ai_generated) on video posts, published as Reels. On unless set to false',
+      'How a video (non-story) post is published: "reel" (Reels, 3 to 90 seconds), "video" (a normal Page video, any length, title and description passed through), or "auto" (the default: Reel up to 90 seconds, Page video when longer or when the length cannot be read)',
+  })
+  video_format?: 'auto' | 'reel' | 'video';
+
+  @IsOptional()
+  @JSONSchema({
+    description:
+      'AI self-disclosure (is_ai_generated) on videos published as Reels. On unless set to false. Normal Page videos have no AI field in the Graph API: label those by hand in Meta Business Suite',
   })
   is_ai_generated?: boolean;
 }

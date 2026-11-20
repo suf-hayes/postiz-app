@@ -28,6 +28,21 @@ const postType = [
   },
 ];
 
+const videoFormat = [
+  {
+    value: 'auto',
+    label: 'Auto (Reel up to 90s, Page video when longer)',
+  },
+  {
+    value: 'reel',
+    label: 'Reel (AI label set automatically)',
+  },
+  {
+    value: 'video',
+    label: 'Page video (any length, label AI by hand)',
+  },
+];
+
 export const FacebookSettings = () => {
   const t = useT();
   const { register, watch, setValue } = useSettings();
@@ -78,6 +93,17 @@ export const FacebookSettings = () => {
             label={'Video Title (only for video Post)'}
             {...register('title')}
           />
+          <Select
+            label="Video Format (only for video Post)"
+            hideErrors
+            {...register('video_format')}
+          >
+            {videoFormat.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </Select>
         </>
       )}
 

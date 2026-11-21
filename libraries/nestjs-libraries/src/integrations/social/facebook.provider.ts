@@ -11,6 +11,7 @@ import dayjs from 'dayjs';
 import {
   BadBody,
   SocialAbstract,
+  stripQuery,
   ValidityMedia,
 } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import {
@@ -25,6 +26,9 @@ import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorato
 import { DashboardFunction } from '@gitroom/nestjs-libraries/integrations/dashboard.function.decorator';
 
 export const META_GRAPH_API_VERSION = 'v25.0';
+
+// Facebook rejects Page Reels longer than this
+export const FACEBOOK_REEL_MAX_SECONDS = 90;
 
 type FacebookStoryPending = {
   postType: 'story';
@@ -43,10 +47,18 @@ type FacebookReelPending = {
   aiGenerated: boolean;
 };
 
-type FacebookPending = FacebookStoryPending | FacebookReelPending;
+type FacebookVideoPending = {
+  postType: 'video';
+  videoId: string;
+};
+
+type FacebookPending =
+  | FacebookStoryPending
+  | FacebookReelPending
+  | FacebookVideoPending;
 
 @Rules(
-  "Facebook posts can be text only, or include photos or a video. If it's a story, it must have at least one attachment (photo or video), and each media is published as a separate story. Video posts (not stories) are published as Reels (vertical, 3 to 90 seconds) and can carry an optional title."
+  "Facebook posts can be text only, or include photos or a video. If it's a story, it must have at least one attachment (photo or video), and each media is published as a separate story. Video posts (not stories) are published as Reels (vertical, 3 to 90 seconds) when they are 90 seconds or shorter, and as normal Page videos (any length) when longer; video_format can force either. Video posts can carry an optional title."
 )
 export class FacebookProvider extends SocialAbstract implements SocialProvider {
   identifier = 'facebook';
@@ -554,9 +566,15 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     throw new Error('Page not found in your accounts');
   }
 
-  // Single, read-only status check of a story video - the polling loop that
-  // used to live inside post() is now driven by the post workflow.
-  private async fbVideoStatus(videoId: string, accessToken: string) {
+  // Single, read-only status check of a story or Page video - the polling
+  // loop that used to live inside post() is now driven by the post workflow.
+  // A Page video waits for 'ready': on 'upload_complete' it is still
+  // processing and not yet visible.
+  private async fbVideoStatus(
+    videoId: string,
+    accessToken: string,
+    readyOnly = false
+  ) {
     const { status } = await (
       await this.fetch(
         `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${videoId}?fields=status&access_token=${accessToken}`,
@@ -569,7 +587,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
     const videoStatus = status?.video_status || 'in_progress';
 
-    if (videoStatus === 'error') {
+    if (['error', 'upload_failed', 'expired'].includes(videoStatus)) {
       throw new BadBody(
         this.identifier,
         JSON.stringify({ status }),
@@ -578,7 +596,10 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       );
     }
 
-    return videoStatus === 'upload_complete' || videoStatus === 'ready';
+    return (
+      videoStatus === 'ready' ||
+      (!readyOnly && videoStatus === 'upload_complete')
+    );
   }
 
   // Single, read-only status check of a Reel. 'published' as soon as the
@@ -714,10 +735,16 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       ];
     }
 
-    // Videos go out as Reels: only /video_reels takes the is_ai_generated
-    // self-disclosure, /{page}/videos has no AI field. The upload is invisible
-    // until finalizePost sends the finish call.
+    // Short videos go out as Reels: only /video_reels takes the
+    // is_ai_generated self-disclosure, /{page}/videos documents no AI field
+    // (it takes an is_ai_generated without error, but the field can't be
+    // read back on any video, so nothing shows it applies). The upload is
+    // invisible until finalizePost sends the finish call.
     if (hasExtension(firstPost?.media?.[0]?.path, 'mp4')) {
+      if (!(await this.publishAsReel(firstPost))) {
+        return this.postPageVideo(id, accessToken, firstPost);
+      }
+
       const { video_id, upload_url } = await (
         await this.fetch(
           `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/video_reels?upload_phase=start&access_token=${accessToken}`,
@@ -761,11 +788,79 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     return this.postNonStory(id, accessToken, postDetails);
   }
 
+  // Reels cap at 90 seconds, so 'auto' only keeps a video a Reel when its
+  // length is known to fit. An unreadable length goes out as a Page video:
+  // a long Reel fails outright, a Page video only lacks the API AI label.
+  private async publishAsReel(post: PostDetails<FacebookDto>) {
+    const format = post?.settings?.video_format || 'auto';
+    if (format !== 'auto') {
+      return format === 'reel';
+    }
+
+    const duration = await this.videoDuration(post.media![0].path);
+    if (duration === undefined) {
+      console.warn(
+        'Facebook: could not read the video length, publishing as a Page video (no AI label)',
+        { path: stripQuery(post.media![0].path) }
+      );
+      return false;
+    }
+
+    return duration <= FACEBOOK_REEL_MAX_SECONDS;
+  }
+
+  // Normal Page video: Facebook pulls file_url itself and publishes once
+  // processing finishes; checkPostStatus waits for that before the post
+  // counts as done, so a first comment never races the processing.
+  private async postPageVideo(
+    id: string,
+    accessToken: string,
+    post: PostDetails<FacebookDto>
+  ): Promise<PostResponse[]> {
+    const { id: videoId } = await (
+      await this.fetch(
+        `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${id}/videos?access_token=${accessToken}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            file_url: post.media![0].path,
+            description: post.message || '',
+            ...(post?.settings?.title ? { title: post.settings.title } : {}),
+            published: true,
+          }),
+        },
+        'upload page video'
+      )
+    ).json();
+
+    return [
+      {
+        id: post.id,
+        postId: '',
+        releaseURL: '',
+        status: 'pending',
+        pendingData: {
+          postType: 'video',
+          videoId,
+        } satisfies FacebookVideoPending,
+      },
+    ];
+  }
+
   override async checkPostStatus(
     accessToken: string,
     pendingData: FacebookPending,
     integration: Integration
   ): Promise<PendingCheckResponse> {
+    if (pendingData.postType === 'video') {
+      return (await this.fbVideoStatus(pendingData.videoId, accessToken, true))
+        ? { status: 'ready', pendingData }
+        : { status: 'pending', pendingData };
+    }
+
     if (pendingData.postType === 'reel') {
       const reel = await this.fbReelStatus(pendingData.videoId, accessToken);
       if (reel === 'published') {
@@ -822,6 +917,15 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     pendingData: FacebookPending,
     integration: Integration
   ): Promise<PendingCheckResponse> {
+    // published by the upload call itself, nothing left to send
+    if (pendingData.postType === 'video') {
+      return {
+        status: 'completed',
+        postId: pendingData.videoId,
+        releaseURL: `https://www.facebook.com/${integration.internalId}/videos/${pendingData.videoId}`,
+      };
+    }
+
     if (pendingData.postType === 'reel') {
       // same query-string shape as the video_stories finish call above
       const params = new URLSearchParams({
